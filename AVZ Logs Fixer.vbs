@@ -1,7 +1,7 @@
 ' AVZ Logs Fixer by Dragokas & regist
 ' Создан специально для ассоциации VirusNet [ SafeZone.cc ]
-' ------------------------------------------------------------- ver. 1.14
-Option Explicit: ver = "1.14"
+' ------------------------------------------------------------- ver. 1.15
+Option Explicit: ver = "1.15"
 
 ' <<< ------ Укажите основную папку, где Вы сохраняете логи AVZ !!!
 LogFolder = "c:\папка с Вашими логами"
@@ -110,6 +110,13 @@ ParserSwitches = "<LOG>"
 ' Исправлен баг, когда не фиксился HTM в случае переноса на скрипт ZIP-архива
 ' Удалена ЭЦП (более быстрый запуск скрипта).
 
+' Изменение - v.1.15
+' улучшена очистка ресурсов
+' фикс 8a - предупреждение, если в логе дублируется секция <WMI_INFO>
+' фикс 8b - предупреждение, если в логе дублируется секция <NET_DIAG>
+' фикс 9 - предупреждение, если в логе нет закрывающего тега </NET_DIAG>
+
+
 Dim ver, AppName, LogFolder, CopytoBufer, Silent, AVZParser, ParserSwitches, NoBackup, syscure, syscheck, syscheckH, syscureH, oFSO, Zip
 Dim wasAutoLoggerArc, ALArcFile, ALArcFolder, NoBackup_AL, FolderDestTMP
 
@@ -150,12 +157,12 @@ Sub main()
 		if not oFSO.FolderExists(LogFolder) then 
 			msgbox "Папка с логами указана неверно." & vblf & "Пожалуйста, задайте другую в 7-й строке этого скрипта.",vbInformation,AppName
 			CreateObject("WScript.Shell").Run "notepad.exe " & """" & WScript.ScriptFullName & """"
-			WScript.Quit 1
+			Release: WScript.Quit 1
 		end if
 		'Открываем диалог выбора файла/папки
 		Folder = ""
 		Folder = OpenFileDialogue(LogFolder)
-		if len(Folder) = 0 then WScript.Quit 1 'ничего не выбрано
+		if len(Folder) = 0 then Release: WScript.Quit 1 'ничего не выбрано
 
 		if oFSO.FolderExists(Folder) then
 			FindLogs Folder, syscheck, syscure ' определяем имена архивов или XML в указанной папке
@@ -167,7 +174,7 @@ Sub main()
 					FindLogs FolderDestTMP, syscheck, syscure
 				end if
 			else
-				WScript.Quit 1
+				Release: WScript.Quit 1
 			end if
 		end if
 
@@ -218,6 +225,11 @@ Sub main()
 		end if
 	end if
 
+	set oFSO = Nothing
+End Sub
+
+Sub Release()
+	Set Zip = Nothing
 	set oFSO = Nothing
 End Sub
 
@@ -290,7 +302,7 @@ Sub FindLogs(Folder, syscheck, syscure) 'byref syscheck, byref syscure
 			WScript.Quit 1
 		end if
 		if not Silent then
-			if msgbox("Подтвердите выбор логов:" & vbLf & syscure & vbLf & syscheck, vbQuestion + vbYesNo,AppName & ": Подтверждение") = vbNo then WScript.Quit 1
+			if msgbox("Подтвердите выбор логов:" & vbLf & syscure & vbLf & syscheck, vbQuestion + vbYesNo,AppName & ": Подтверждение") = vbNo then Release: WScript.Quit 1
 		end if
 End Sub
 
@@ -346,13 +358,13 @@ Function FixIt(path)
 					oFSO.DeleteFolder temp, true
 				else
 					msgbox "Фикс не был применен.",,AppName
-					WScript.Quit 1
+					Release: WScript.Quit 1
 				end if
 			end if
 		end if
 
 		' Если не хватает прав для удаления временной папки распаковки
-		if Err.Number <> 0 then call Elevate("Не хватает прав для удаления временной папки распаковки."): WScript.Quit 5
+		if Err.Number <> 0 then call Elevate("Не хватает прав для удаления временной папки распаковки."): Release: WScript.Quit 5
 		Err.Clear: on error goto 0
 		Zip.UnpackArchive path, temp
 
@@ -368,7 +380,7 @@ Function FixIt(path)
 					oFSO.DeleteFile ArcFixed, true
 				else
 					msgbox "Архив не был создан.",,AppName
-					WScript.Quit 1
+					Release: WScript.Quit 1
 				end if
 			end if
 		end if
@@ -457,7 +469,7 @@ Function FixIt(path)
 		if not Silent then
 			msgbox "Формат файла " & ext & " не поддерживается !" & vblf & "Допустимы только .zip и .xml",vbCritical,AppName
 		end if
-		WScript.Quit 1
+		Release: WScript.Quit 1
 	End Select
 
 	if FixItH then FixIt = true
@@ -524,7 +536,7 @@ End Function
 ' Движок фикса XML
 ' *********************
 Function FixXML(file_or, file_fix)
-	Dim pos1, pos2, pos_q2, i, arStr, sLine, j, Section
+	Dim pos1, pos2, pos_q2, i, arStr, sLine, j, v1, Section, y1, y2, HasTag, S1_y1, S1_y2, S2_y1, S2_y2, BadSection
 
 	if not ReadFileToArray(file_or, arStr, file_fix) then exit function
 
@@ -547,7 +559,6 @@ Function FixXML(file_or, file_fix)
 	' fix # 2. Ampersand
 	' Проблема: Неэкранированные амперсанды в имени пользователя
 	' Решение:  замена & -> &amp;
-	dim v1
 	sLine = arStr(1) 'Читаем 2-ю строку
 		pos1 = instr(1, sLine, "ProfileDir=""", vbtextcompare) 'парсинг по ключевому слову ProfileDir="
 		if (pos1 > 0) then
@@ -632,8 +643,190 @@ Function FixXML(file_or, file_fix)
 		end if
 	next
 
+	'fix # 8a. <WMI_INFO> sections is doubled
+	'Проблема: Дублируется секция <WMI_INFO>
+	'Решение1: Удалить второй дубликат (код закомментирован)
+	'Решение2: Предупредить пользователя, чтобы сам удалил ненужную часть секции
+	Section = false
+	y2 = 0
+	for i = 0 to Ubound(arStr)
+		sLine = arStr(i)
+		' секция ещё не найдена
+		if false = Section then
+			if left(sLine, 10) = "<WMI_INFO>" then Section = true 'Ищу секцию WMI_INFO		
+		else
+			if left(sLine, 10) = "<WMI_INFO>" then 'нашли дубль
+				y1 = i
+				for j = i + 1 to Ubound(arStr)
+					sLine = arStr(j)
+					'1-й признак - тег </WMI_INFO>
+					if left(sLine, 11) = "</WMI_INFO>" then y2 = j: exit for
+					'2-й признак (резервный) - нет пробела первым символом (это на случай, если у дубля также не будет закрывающего тега)
+					if left(sLine, 1) <> " " then
+						if y2 = 0 then y2 = j
+					end if
+				next
+
+				if y2 = 0 then
+					y2 = Ubound(arStr)
+				end if
+				
+'				arStr = CutArray(arStr, y1, y2)
+'				FixXML = true ' флаг, что были изменения
+
+				msgbox "!!! Найдено дублирование секции <WMI_INFO> !!!" & vbcrlf & "Вам необходимо вручную удалить из XML ненужную часть.",,AppName
+
+				exit for
+			end if
+		end if
+	next
+
+	'fix # 8b. <NET_DIAG> section is doubled
+	'Проблема: Дублируется секция <NET_DIAG>
+	'Решение1: Удалить дубликат, который содержит нулевые данные (код закомментирован)
+	
+	'почти аналогично для секции <NET_DIAG> (только нужно проверять, какую из секций оставить, а какую вырезать). В образце - первой шла битая секция, пример:
+	'<NET_DIAG>
+	' <DNS>
+	'  <Host Name="yandex.ru" IP="" Ping="0" PingInfo="11010,0,0.0.0.0" />
+	'  <Host Name="google.ru" IP="" Ping="0" PingInfo="11010,0,0.0.0.0" />
+	'  ...
+	
+	'Решение2: Предупредить пользователя, чтобы сам удалил ненужную часть секции
+	
+	Section = false
+	BadSection = false
+	
+	for i = 0 to Ubound(arStr)
+		sLine = arStr(i)
+		' секция ещё не найдена
+		if false = Section then
+			if left(sLine, 10) = "<NET_DIAG>" then 
+				Section = true 'Ищу секцию NET_DIAG
+				'записываем границы секции в S1_y1, S1_y2
+				'признак завершения: 1. Отсутствующий лидирубщий пробел. 2. Тег завершения "</NET_DIAG>", 3. Тег "<WMI_INFO>". 4. " <RK_UM>". 5. " <IPU>". 6. " <WIZARD-TSW>". 7. "</AVZ>"
+				S1_y1 = i
+				for j = i + 1 to Ubound(arStr)
+					sLine = Trim(arStr(j))
+					if instr(sLine, """yandex.ru"" IP="""" Ping=""0""") <> 0 then BadSection = true
+					if sLine = "</NET_DIAG>" then S1_y2 = j: exit for
+					if sLine = "<WMI_INFO>" or _
+					   sLine = "<RK_UM>" or _
+					   sLine = "<IPU>" or _
+      					   sLine = "<WIZARD-TSW>" or _
+      					   sLine = "</AVZ>" or _
+					   left(arStr(j), 1) <> " " then
+						   S1_y2 = j - 1: exit for
+					end if
+				next
+				if S1_y2 = 0 then S1_y2 = UBound(arStr)
+			end if
+		else
+			if left(sLine, 10) = "<NET_DIAG>" then 'нашли дубль
+			'записываем границы секции в S2_y1, S2_y2
+			
+				'признак завершения: 1. Отсутствующий лидирубщий пробел. 2. Тег завершения "</NET_DIAG>", 3. Тег "<WMI_INFO>". 4. " <RK_UM>". 5. " <IPU>". 6. " <WIZARD-TSW>". 7. "</AVZ>"
+				S2_y1 = i
+				for j = i + 1 to Ubound(arStr)
+					sLine = Trim(arStr(j))
+					if sLine = "</NET_DIAG>" then S2_y2 = j: exit for
+					if sLine = "<WMI_INFO>" or _
+					   sLine = "<RK_UM>" or _
+					   sLine = "<IPU>" or _
+      					   sLine = "<WIZARD-TSW>" or _
+      					   sLine = "</AVZ>" or _
+					   left(arStr(j), 1) <> " " then
+						   S2_y2 = j - 1: exit for
+					end if
+				next
+				if S2_y2 = 0 then S2_y2 = UBound(arStr)
+				
+'				if BadSection ' 1-я секция плохая?
+'					arStr = CutArray(arStr, S1_y1, S1_y2)
+'				else
+'					arStr = CutArray(arStr, S2_y1, S2_y2)
+'				end if
+'
+'				FixXML = true ' флаг, что были изменения
+
+				msgbox "!!! Найдено дублирование секции <NET_DIAG> !!!" & vbcrlf & "Вам необходимо вручную удалить из XML ненужную часть (строки №№ " & vbcrlf & _
+					(S1_y1 + 1) & "-" & (S1_y2 + 1) & ", " & (S2_y1 + 1) & "-" & (S2_y2 + 1) & ").",,AppName
+
+				exit for
+			end if
+		end if
+	next
+	
+	'fix # 9. Lost </NET_DIAG> final tag
+	'Проблема: нет закрывающего тега </NET_DIAG>
+	'Решение1: добавить тег </NET_DIAG>. Признак завершения секции: 1. Отсутствующий лидирубщий пробел. 2. Тег "<WMI_INFO>". 3. " <RK_UM>". 4. " <IPU>". 5. " <WIZARD-TSW>". 6. "</AVZ>" 7. Конец файла (закомментирован)
+	'Решение2: просто предупредить
+	Section = false
+	HasTag = false
+	y2 = 0
+	for i = 0 to Ubound(arStr)
+		sLine = arStr(i)
+		' секция ещё не найдена
+		if false = Section then
+			if left(sLine, 10) = "<NET_DIAG>" then Section = true: HasTag = false 'Ищу секцию NET_DIAG		
+		else
+			sLine = Trim(arStr(i))
+
+			if sLine = "</NET_DIAG>" then 
+				HasTag = true: Section = false: y2 = 0 'нашли концевой тег -> продолжаем поиск, если есть дубликаты секций
+			else
+				'ищу заранее позицию для вставки концевого тега
+				if sLine = "<WMI_INFO>" or _
+				   sLine = "<RK_UM>" or _
+				   sLine = "<IPU>" or _
+				   sLine = "<WIZARD-TSW>" or _
+				   sLine = "</AVZ>" or _
+				   left(arStr(i), 1) <> " " then
+					Section = false
+					y2 = i
+'					arStr = InsertEmptyToArray(arStr, y2, 1)
+'					arStr(y2) = "</NET_DIAG>"
+'					FixXML = true ' флаг, что были изменения
+					msgbox "!!! Не найдено закрывающего тега </NET_DIAG> !!!" & vbcrlf & "Добавьте его вручную.",,AppName
+				end if
+			end if
+		end if
+	next
+
 	call WriteArrayToFile(arStr, file_fix)
 
+End Function
+
+'вставляет пустые элементы в массив (подряд начиная с позиции pos в кол-ве cnt шт.), увеличивая размер массива на cnt
+Function InsertEmptyToArray(aSrc, pos, cnt)
+	Dim i, newArr()
+	if pos <= UBound(aSrc) then
+		redim newArr(UBound(aSrc) + cnt)
+		for i = 0 to pos - 1
+			newArr(i) = aSrc(i)
+		next
+		for i = pos to UBound(aSrc)
+			newArr(i + cnt) = aSrc(i)
+		next
+	else
+		newArr = aSrc
+		redim preserve newArr(UBound(aSrc) + cnt)
+	end if
+	InsertEmptyToArray = newArr
+End Function
+
+'вырезает последовательную часть элементов из массива (начало вырезки из эл-та № - n1, конец - n2, результат - новый массив)
+Function CutArray(aSrc, n1, n2)
+	Dim i, cur, newArr
+	redim newArr(UBound(aSrc))
+	for i = 0 to UBound(aSrc)
+		if i < n1 or i > n2 then
+			newArr(cur) = aSrc(i)
+			cur = cur + 1
+		end if
+	next
+	redim preserve newArr(cur)
+	CutArray = newArr
 End Function
 
 Function ReadFileToArray(file, arr, file_out)
@@ -661,7 +854,7 @@ Function WriteArrayToFile(arr, file)
 		.Write StringToByteArray(varStr)
 		on error resume next
 		.SaveToFile file, 2: .Close
-		if Err.Number <> 0 then call Elevate("Не хватает прав для создания фикса " & file): WScript.Quit
+		if Err.Number <> 0 then call Elevate("Не хватает прав для создания фикса " & file): Release: WScript.Quit
 		Err.Clear: on error goto 0
 	end with
 End function
@@ -682,14 +875,14 @@ Function OpenFileDialogue(StartFolder)
 	on error resume next
     Dim oFolder: Set oFolder = CreateObject("Shell.Application").BrowseForFolder(0, "Выбор папки с архивом или файлом XML лога AVZ", 16 + 16384, StartFolder)
     If not (oFolder is Nothing) Then OpenFileDialogue = oFolder.Self.Path
-	if Err.Number <> 0 or len(OpenFileDialogue) = 0 then msgbox "Выбирать можно только папки !",,AppName: WScript.Quit 1
+	if Err.Number <> 0 or len(OpenFileDialogue) = 0 then msgbox "Выбирать можно только папки !",,AppName: Release: WScript.Quit 1
 	set oFolder = Nothing
 end Function
 
 ' Повышение привилегий
 Sub Elevate(msg)
 	Const DQ = """"
-	if msgbox(msg & vblf & "Запустить с Административными привилегиями ?", vbQuestion + vbYesNo,AppName & ": Подтверждение") = vbNo then WScript.Quit 5
+	if msgbox(msg & vblf & "Запустить с Административными привилегиями ?", vbQuestion + vbYesNo,AppName & ": Подтверждение") = vbNo then Release: WScript.Quit 5
 	Dim oShellApp: Set oShellApp = CreateObject("Shell.Application")
 	' Конкатенация аргументов
 	Dim args, i: For i = 1 to WScript.Arguments.Count
@@ -734,7 +927,7 @@ Class ZipClass
             Set FileSystemObject = CreateObject("Scripting.FileSystemObject")
         End Sub
 		Private Sub Class_Terminate
-			Set Shell = Nothing: Set FileSystemObject = Nothing
+			Set ArchiveFolder = Nothing: Set Shell = Nothing: Set FileSystemObject = Nothing: Set oShApp = Nothing
 		End Sub
 		Function UnpackArchive(SourceArchive, DestPath) 'Распаковка архива
 			Dim objSource, objTarget
@@ -742,12 +935,12 @@ Class ZipClass
 			on error resume next
 			if not FileSystemObject.FolderExists(DestPath) then FileSystemObject.CreateFolder(DestPath)
 			' Если не хватает прав для создания временной папки распаковки
-			if Err.Number <> 0 then call Elevate("Не хватает прав для создания временной папки распаковки."): WScript.Quit 0
+			if Err.Number <> 0 then call Elevate("Не хватает прав для создания временной папки распаковки: " & DestPath): Class_Terminate: WScript.Quit 0
 			on error goto 0
 			Set objTarget = Shell.NameSpace(DestPath)
 			objTarget.CopyHere objSource, 4+16
 	  	    Do: Wscript.Sleep 200: Loop Until objTarget.Items().Count => objSource.Count
-			Set objSource = Nothing
+			Set objSource = Nothing: Set objTarget = Nothing
 		End Function
         Function CreateArchive(ZipArchivePath) 'Подготовка ZIP-папки
             If lcase(FileSystemObject.GetExtensionName(ZipArchivePath)) <> "zip" Then Exit Function
@@ -755,7 +948,7 @@ Class ZipClass
 			on error resume next
 			Dim oTS: set oTS = FileSystemObject.OpenTextFile(ZipArchivePath, 2, True)
 			' Если не хватает прав для создания архива
-			if Err.Number <> 0 then call Elevate("Не хватает прав для создания архива."): WScript.Quit 0
+			if Err.Number <> 0 then call Elevate("Не хватает прав для создания архива: " & ZipArchivePath): Class_Terminate: WScript.Quit 0
 			on error goto 0
 			oTS.Write ZipFileHeader
 			oTS.Close
